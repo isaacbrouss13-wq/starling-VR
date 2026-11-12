@@ -198,7 +198,10 @@ mod frame_gen;
 mod hdr;
 mod hdr_icc;
 mod hdr_stats;
+pub mod headset;
 mod terrain_source;
+#[cfg(feature = "xr")]
+pub mod xr;
 pub use hdr::Calibration as HdrCalibration;
 pub mod block_light;
 mod late_sky;
@@ -844,6 +847,13 @@ pub struct Renderer {
     spare_surface: std::sync::Mutex<Option<wgpu::Surface<'static>>>,
     /// The offscreen colour target, sized like `config`.
     offscreen: Option<wgpu::Texture>,
+    /// Starling VR: the eye being drawn (`render_xr`), the frustum both eyes
+    /// culled with last frame (`camera_frustum`), and the copy into the eyes'
+    /// images.
+    xr_views: Option<ViewSet>,
+    xr_cull: Option<View>,
+    #[cfg_attr(not(feature = "xr"), allow(dead_code))]
+    xr_blit: Option<headset::Blit>,
     /// Offscreen submissions still on the GPU: at most two frames run ahead.
     in_flight: std::collections::VecDeque<wgpu::SubmissionIndex>,
     /// Splitscreen: the caller waits for the GPU once every player has submitted
@@ -1723,6 +1733,12 @@ async fn open_device(
     api: GraphicsApi,
     layers: u32,
 ) -> Result<Opened> {
+    #[cfg(feature = "xr")]
+    match open_headset() {
+        Ok(opened) => return Ok(opened),
+        // The game still runs, on the flat window: a sign of what went wrong.
+        Err(e) => log::error!("Starling VR: no headset ({e}); drawing to the window instead"),
+    }
     let wgpu_backend = std::env::var_os("WGPU_BACKEND").is_some();
     let mut first = None;
     for (order, allow_cpu) in device_search(api.with_env(), std::env::consts::OS, wgpu_backend) {
@@ -1746,6 +1762,49 @@ async fn open_device(
         }
     }
     Err(first.unwrap_or_else(|| NO_GPU_DRIVER.into()))
+}
+/// The headset's device (Starling VR), through OpenXR.
+#[cfg(feature = "xr")]
+fn open_headset() -> std::result::Result<Opened, String> {
+    startup_step(format_args!("opening the headset (OpenXR)"));
+    let xr::Opened {
+        instance,
+        adapter,
+        device,
+        queue,
+        size,
+    } = xr::open(device_features)?;
+    describe_adapter(&adapter);
+    *HEADSET_SIZE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(size);
+    let device_lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let lost = device_lost.clone();
+    device.set_device_lost_callback(move |reason, message| {
+        if reason == wgpu::DeviceLostReason::Destroyed {
+            return;
+        }
+        log::warn!("Horizon renderer: the graphics device was lost ({reason:?}: {message})");
+        lost.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    Ok(Opened {
+        instance,
+        surface: None,
+        adapter,
+        device,
+        queue,
+        device_lost,
+    })
+}
+/// The size the game draws each headset eye at, once the headset is open.
+#[cfg(feature = "xr")]
+static HEADSET_SIZE: std::sync::Mutex<Option<[u32; 2]>> = std::sync::Mutex::new(None);
+/// Whether frames go to a headset (Starling VR).
+fn headset() -> bool {
+    #[cfg(feature = "xr")]
+    return xr::active();
+    #[cfg(not(feature = "xr"))]
+    false
 }
 /// The tries `open_device` makes, in turn: the chosen API's backends (`backend_order`) on a
 /// real GPU; when the player chose one API, the other backends `Auto` would try, on a real
@@ -1895,20 +1954,7 @@ async fn open_backend(
     // (`MC_GL_KHR_shader_subgroup_*`); storage buffers in vertex shaders, clearing and
     // atomics on images: their buffers and images. Depth clamping: what lies between the light
     // and a shader pack's shadow camera still casts its shadow (`light_frustum`).
-    let features = timing::GpuTimer::features(&adapter)
-        | cull::Cull::features(&adapter)
-        | oit::features(&adapter)
-        | (adapter.features()
-            & (wgpu::Features::INDIRECT_FIRST_INSTANCE
-                | wgpu::Features::MAPPABLE_PRIMARY_BUFFERS
-                | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
-                | wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
-                | wgpu::Features::RG11B10UFLOAT_RENDERABLE
-                | wgpu::Features::SUBGROUP
-                | wgpu::Features::VERTEX_WRITABLE_STORAGE
-                | wgpu::Features::CLEAR_TEXTURE
-                | wgpu::Features::TEXTURE_ATOMIC
-                | wgpu::Features::DEPTH_CLIP_CONTROL));
+    let features = device_features(&adapter);
     let driver = format!("{} {}", info.driver, info.driver_info);
     crate::hud::set_gpu_texture_side(adapter.limits().max_texture_dimension_2d);
     startup_step(format_args!(
@@ -1968,6 +2014,23 @@ async fn open_backend(
         }
         Err(e) => Err(NoDevice::Failed(format!("{name} device: {e}"))),
     }
+}
+/// The features Horizon asks a device for, of those `adapter` has.
+fn device_features(adapter: &wgpu::Adapter) -> wgpu::Features {
+    timing::GpuTimer::features(adapter)
+        | cull::Cull::features(adapter)
+        | oit::features(adapter)
+        | (adapter.features()
+            & (wgpu::Features::INDIRECT_FIRST_INSTANCE
+                | wgpu::Features::MAPPABLE_PRIMARY_BUFFERS
+                | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
+                | wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
+                | wgpu::Features::RG11B10UFLOAT_RENDERABLE
+                | wgpu::Features::SUBGROUP
+                | wgpu::Features::VERTEX_WRITABLE_STORAGE
+                | wgpu::Features::CLEAR_TEXTURE
+                | wgpu::Features::TEXTURE_ATOMIC
+                | wgpu::Features::DEPTH_CLIP_CONTROL))
 }
 /// What to tell a player whose system offers no usable graphics adapter.
 /// Vulkan is loaded at run time (the game links no graphics library), so a
@@ -2156,6 +2219,12 @@ impl Renderer {
         let info = adapter.get_info();
         crate::graphics::suggest_reduced_far_detail(crate::graphics::lod_capped(&info));
         let size = window.inner_size();
+        // A headset's eyes, not the window, set the frame's size.
+        #[cfg(feature = "xr")]
+        let size = HEADSET_SIZE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .map_or(size, |[w, h]| winit::dpi::PhysicalSize::new(w, h));
         let max_side = device.limits().max_texture_dimension_2d;
         let (config, present_modes, hdr_output) = if let Some(surface) = &surface {
             let mut config = surface
@@ -2211,9 +2280,11 @@ impl Renderer {
         } else {
             let format = wgpu::TextureFormat::Bgra8Unorm;
             let config = wgpu::SurfaceConfiguration {
+                // Sampled too: a headset's eyes copy it into their images (`render_xr`).
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                     | wgpu::TextureUsages::COPY_SRC
-                    | wgpu::TextureUsages::COPY_DST,
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
                 format,
                 width: size.width.clamp(1, max_side),
                 height: size.height.clamp(1, max_side),
@@ -4091,6 +4162,9 @@ impl Renderer {
             surface: surface.map(Arc::new),
             spare_surface: std::sync::Mutex::new(None),
             offscreen,
+            xr_views: None,
+            xr_cull: None,
+            xr_blit: None,
             in_flight: std::collections::VecDeque::new(),
             paced_elsewhere: false,
             first_frame: if previous.is_none() {
@@ -4437,6 +4511,11 @@ impl Renderer {
     }
     /// The window is back, maybe at another size: a new surface on it.
     pub fn resume(&mut self, width: u32, height: u32) -> Result<()> {
+        if headset() {
+            self.suspended = false;
+            self.detached = false;
+            return Ok(());
+        }
         if !drawable_size(width, height, self.device.limits().max_texture_dimension_2d) {
             return Ok(());
         }
@@ -4546,6 +4625,10 @@ impl Renderer {
     /// Follows the window to `width` x `height`. A size the swapchain can't take
     /// ([`drawable_size`]) keeps the last one and draws nothing until the next.
     pub fn resize(&mut self, width: u32, height: u32) {
+        // The headset's eyes set the size, not the window.
+        if headset() {
+            return;
+        }
         let max = self.device.limits().max_texture_dimension_2d;
         self.suspended = !drawable_size(width, height, max);
         if self.suspended {
@@ -6054,6 +6137,9 @@ impl Renderer {
     }
     /// The views `render` draws `frame` from.
     pub fn views(&self, frame: &Frame) -> ViewSet {
+        if let Some(eye) = self.xr_views {
+            return eye;
+        }
         ViewSet::single(self.screen_view(
             frame.fov_degrees,
             frame.yaw,
@@ -6071,6 +6157,13 @@ impl Renderer {
         bob: Mat4,
         depth_far: f32,
     ) -> Frustum {
+        // In a headset: the frustum both eyes culled with last frame, widened for the head's
+        // turn since.
+        if let Some(cull) = &self.xr_cull {
+            return Frustum {
+                planes: frustum(cull.view_proj(bob)),
+            };
+        }
         let views = ViewSet::single(self.screen_view(fov_degrees, yaw, pitch, depth_far));
         Frustum {
             planes: frustum(views.cull().view_proj(bob)),
@@ -6170,6 +6263,7 @@ impl Renderer {
         }
         let scaled = self.screenshot_size();
         let rendered = match scaled {
+            _ if headset() => self.render_xr(frame),
             Some(size) => self.draw_scaled_frame(frame, size),
             None => self.draw_frame(frame, None),
         };
@@ -6230,6 +6324,70 @@ impl Renderer {
     /// every pass sizes itself by `config`, which says `size` for this frame, the HUD
     /// keeps its layout at a larger scale, and the world is drawn at `size` (a Resolution
     /// Scale below 100% stays as low). The window keeps its last frame.
+    /// One headset frame (Starling VR): the frame drawn once per eye into the offscreen target,
+    /// from that eye, and copied into the eye's image; then both shown.
+    fn render_xr(&mut self, frame: &Frame) -> Result<bool> {
+        #[cfg(feature = "xr")]
+        {
+            let Some(views) = xr::begin_frame(frame.depth_far)? else {
+                return Ok(false);
+            };
+            if self.xr_blit.is_none() {
+                self.xr_blit = Some(headset::Blit::new(&self.device, xr::swapchain_format()));
+            }
+            let mut result = Ok(false);
+            for eye in 0..2 {
+                self.xr_views = Some(ViewSet::eye(views.eyes[eye], views.cull));
+                let drawn = self.draw_frame(frame, None);
+                self.xr_views = None;
+                let copied = drawn.and_then(|drawn| -> Result<bool> {
+                    let target = xr::acquire(eye)?;
+                    let source = self
+                        .offscreen
+                        .as_ref()
+                        .ok_or("no offscreen target")?
+                        .create_view(&wgpu::TextureViewDescriptor {
+                            format: Some(self.config.format.remove_srgb_suffix()),
+                            ..Default::default()
+                        });
+                    let mut encoder =
+                        self.device
+                            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("Starling VR eye"),
+                            });
+                    if let Some(blit) = &self.xr_blit {
+                        blit.draw(&self.device, &mut encoder, &source, &target);
+                    }
+                    self.queue.submit([encoder.finish()]);
+                    xr::release(eye)?;
+                    Ok(drawn)
+                });
+                result = match (result, copied) {
+                    (Ok(a), Ok(b)) => Ok(a | b),
+                    (Err(e), _) | (_, Err(e)) => Err(e),
+                };
+                if result.is_err() {
+                    break;
+                }
+            }
+            self.xr_cull = Some(views.cull);
+            match result {
+                Ok(drawn) => {
+                    xr::end_frame(&views.frame)?;
+                    Ok(drawn)
+                }
+                Err(e) => {
+                    xr::end_empty(&views.frame);
+                    Err(e)
+                }
+            }
+        }
+        #[cfg(not(feature = "xr"))]
+        {
+            let _ = frame;
+            Ok(false)
+        }
+    }
     fn draw_scaled_frame(&mut self, frame: &Frame, size: [u32; 2]) -> Result<bool> {
         let window = [self.config.width, self.config.height];
         let mut config = self.config.clone();
@@ -6461,7 +6619,9 @@ impl Renderer {
         let view_proj = views.primary().view_proj(pose);
         laps.lap("r_acquire");
         // TAA runs where the world post pass does, not under a shader pack's own.
+        // Not in a headset: its history would mix the two eyes.
         let taa = !frame.title
+            && self.xr_views.is_none()
             && self.pack_post.as_ref().is_none_or(|p| p.1.is_none())
             && self.native.as_ref().is_none_or(|n| n.post.is_none());
         let jittered = self.world_post.jitter(

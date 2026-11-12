@@ -820,8 +820,13 @@ mod input {
         Some(InputStatus::Handled)
     }
 
-    /// The active controller's device id and state, `None` before one was used.
+    /// The active controller's device id and state, `None` before one was used. In a headset
+    /// (Starling VR), the Quest's controllers.
     pub fn pad_state() -> Option<(i32, PadState)> {
+        #[cfg(feature = "xr")]
+        if let Some(c) = horizon_client::gfx::xr::controllers() {
+            return Some((super::QUEST_PAD, super::quest_pad(&c)));
+        }
         PADS.lock().unwrap_or_else(|e| e.into_inner()).active()
     }
 
@@ -839,6 +844,36 @@ mod input {
 }
 
 pub use input::{MouseEvent, keyboard_used, pad_state, take_mouse_events};
+
+/// The device id the Quest's controllers play as (no Android device has a negative one).
+pub const QUEST_PAD: i32 = -1000;
+
+/// The Quest's controllers as a pad, by place as Android names a pad's buttons: A, B, X and Y the
+/// face buttons (A at the bottom), the grips the bumpers, the left menu button Start.
+#[cfg(feature = "xr")]
+fn quest_pad(c: &horizon_client::gfx::xr::Controllers) -> horizon_client::gamepad::PadState {
+    use horizon_client::gamepad::{Button, PadState};
+    let mut pad = PadState {
+        left: c.left,
+        right: c.right,
+        triggers: c.triggers,
+        ..PadState::default()
+    };
+    for (button, down) in [
+        (Button::South, c.a),
+        (Button::East, c.b),
+        (Button::West, c.x),
+        (Button::North, c.y),
+        (Button::Start, c.menu),
+        (Button::LeftStick, c.left_click),
+        (Button::RightStick, c.right_click),
+        (Button::LeftBumper, c.grips[0] > 0.5),
+        (Button::RightBumper, c.grips[1] > 0.5),
+    ] {
+        pad.set(button, down);
+    }
+    pad
+}
 
 /// Android took the captured pointer back while the game held it (StarlingActivity).
 static POINTER_LOST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -870,6 +905,9 @@ pub fn capture_pointer(capture: bool) {
 
 /// A controller's maker, its USB vendor id (StarlingActivity.padVendor), for its button pictures.
 pub fn pad_vendor(device: i32) -> Option<u16> {
+    if device == QUEST_PAD {
+        return None;
+    }
     with_activity(|env, activity| {
         env.call_method(
             activity,
@@ -885,6 +923,9 @@ pub fn pad_vendor(device: i32) -> Option<u16> {
 
 /// A controller's name (StarlingActivity.padName), for the log; `None` once it is gone.
 pub fn pad_name(device: i32) -> Option<String> {
+    if device == QUEST_PAD {
+        return Some("Meta Quest Touch controllers".into());
+    }
     with_activity(|env, activity| {
         let name = env
             .call_method(
@@ -906,6 +947,14 @@ pub fn pad_name(device: i32) -> Option<String> {
 /// (0 to 255): StarlingActivity.vibratePad.
 pub fn vibrate_pad(device: i32, millis: i32, strong: i32, weak: i32) {
     use jni::objects::JValue;
+    // The Quest's controllers: the heavy motor's buzz in the right hand, the light one's in the left.
+    #[cfg(feature = "xr")]
+    if device == QUEST_PAD {
+        let millis = millis.clamp(0, 2000) as u32;
+        horizon_client::gfx::xr::buzz(0, strong.clamp(0, 255) as f32 / 255.0, millis);
+        horizon_client::gfx::xr::buzz(1, weak.clamp(0, 255) as f32 / 255.0, millis);
+        return;
+    }
     with_activity(|env, activity| {
         env.call_method(
             activity,

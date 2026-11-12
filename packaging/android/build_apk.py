@@ -107,7 +107,7 @@ def ndk_tool(ndk, name):
     return tool(ndk / "toolchains" / "llvm" / "prebuilt" / host / "bin", name)
 
 
-def build_library(profile, ndk, sdk, abi=ABI):
+def build_library(profile, ndk, sdk, abi=ABI, features=()):
     env = dict(os.environ, ANDROID_NDK_HOME=str(ndk), ANDROID_HOME=str(sdk))
     # Preserve source identity in local diagnostic reports, including source builds.
     try:
@@ -121,6 +121,7 @@ def build_library(profile, ndk, sdk, abi=ABI):
     run(
         "cargo", "ndk", "-t", abi, "--platform", MIN_SDK,
         "build", "--profile", profile, "-p", "horizon-android",
+        *(["--features", ",".join(features)] if features else []),
         cwd=ROOT, env=env,
     )
 
@@ -204,6 +205,85 @@ def compile_java(build_tools, android_jar, out):
     return dex / "classes.dex"
 
 
+# Starling VR (--vr): the Khronos OpenXR loader, through which the game finds the headset's runtime,
+# from Maven Central (pinned), and the manifest entries a Quest app needs.
+OPENXR_LOADER = "1.1.65"
+OPENXR_MAVEN = "https://repo1.maven.org/maven2/org/khronos/openxr/openxr_loader_for_android"
+
+
+def openxr_loader(out, abi=ABI):
+    """`libopenxr_loader.so` for `abi`, from the loader's AAR (downloaded once into `out`)."""
+    import urllib.request
+    aar = out / f"openxr_loader_for_android-{OPENXR_LOADER}.aar"
+    if not aar.exists():
+        url = f"{OPENXR_MAVEN}/{OPENXR_LOADER}/{aar.name}"
+        print("+ download", url, flush=True)
+        with urllib.request.urlopen(url) as response:
+            aar.write_bytes(response.read())
+    library = out / "libopenxr_loader.so"
+    with zipfile.ZipFile(aar) as z:
+        member = f"jni/{abi}/libopenxr_loader.so"
+        if member not in z.namelist():
+            sys.exit(f"build_apk: no {member} in {aar.name}")
+        library.write_bytes(z.read(member))
+    return library
+
+
+def vr_manifest(manifest):
+    """The manifest of Starling VR: a Quest app that opens the game straight into the headset."""
+    def insert_after(text, anchor, addition):
+        if anchor not in text:
+            sys.exit(f"build_apk: the manifest has no {anchor!r} for Starling VR")
+        return text.replace(anchor, anchor + addition, 1)
+    manifest = insert_after(
+        manifest,
+        '<uses-feature android:name="android.hardware.touchscreen" android:required="false" />',
+        """
+    <!-- Starling VR: a headset app; the Khronos OpenXR loader finds the headset's runtime through
+         these (Gradle would merge them from the loader's AAR). -->
+    <uses-feature android:name="android.hardware.vr.headtracking" android:required="true" android:version="1" />
+    <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
+    <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />
+    <queries>
+        <provider android:authorities="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker" />
+        <intent>
+            <action android:name="org.khronos.openxr.OpenXRRuntimeService" />
+        </intent>
+        <intent>
+            <action android:name="org.khronos.openxr.OpenXRApiLayerService" />
+        </intent>
+    </queries>""",
+    )
+    manifest = insert_after(
+        manifest,
+        'android:extractNativeLibs="true">',
+        """
+        <meta-data android:name="com.oculus.supportedDevices" android:value="quest2|questpro|quest3|quest3s" />""",
+    )
+    # The home screen opens the game's activity itself, as a headset app: the launcher activity
+    # (a flat window) keeps only the files opened with Starling VR.
+    launcher = """            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>"""
+    if launcher not in manifest:
+        sys.exit("build_apk: the manifest's launcher entry moved; update vr_manifest")
+    manifest = manifest.replace(launcher, "        </activity-alias>", 1)
+    manifest = insert_after(
+        manifest,
+        '<meta-data android:name="android.app.func_name" android:value="starling_on_create" />',
+        """
+            <meta-data android:name="com.oculus.vr.focusaware" android:value="true" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="com.oculus.intent.category.VR" />
+            </intent-filter>""",
+    )
+    return manifest.replace('android:screenOrientation="sensorLandscape"', 'android:screenOrientation="landscape"')
+
+
 def link_resources(aapt2, android_jar, out, assets, variant, abi=ABI):
     """The manifest, the launcher icon, the themes and `assets`, compiled and linked into
     `out/base.apk`; `variant` is None (the release's app) or a key of VARIANTS."""
@@ -212,6 +292,8 @@ def link_resources(aapt2, android_jar, out, assets, variant, abi=ABI):
     application_id = APPLICATION_ID + suffix
     label = LABEL + label_suffix
     manifest = manifest.replace("@APPLICATION_ID@", application_id).replace("@LABEL@", label)
+    if variant == "vr":
+        manifest = vr_manifest(manifest)
     if abi != ABI:
         # Additional architectures may expose GLES only. Validate actual GPU limits.
         manifest = manifest.replace('android:version="0x400003" android:required="true"',
@@ -335,7 +417,7 @@ def main():
             sys.exit(f"build_apk: missing {path}")
 
     if not args.no_build:
-        build_library(args.profile, ndk, sdk, args.abi)
+        build_library(args.profile, ndk, sdk, args.abi, ("xr",) if args.vr else ())
     profile_dir = "debug" if args.profile == "dev" else args.profile
     built = ROOT / "target" / triple / profile_dir / f"lib{LIBRARY}.so"
     if not built.is_file():
@@ -356,6 +438,8 @@ def main():
     dex = compile_java(build_tools, android_jar, out)
     libraries = build_launchers(ndk, out, args.abi)
     libraries[library.name] = library
+    if args.vr:
+        libraries["libopenxr_loader.so"] = openxr_loader(out, args.abi)
     add_code(out / "base.apk", libraries, dex, out / "unsigned.apk", args.abi)
     aligned = out / "aligned.apk"
     run(tool(build_tools, "zipalign"), "-P", "16", "-f", "4", out / "unsigned.apk", aligned)

@@ -269,6 +269,7 @@ mod options;
 mod own_skin;
 mod packs;
 mod pad;
+mod xr_look;
 mod pad_menu;
 mod paintings;
 mod pandas;
@@ -18511,6 +18512,7 @@ impl Game<'_> {
                     self.extras_retry()?;
                     self.apply_mouse_look();
                     self.pad_look(elapsed.as_secs_f32());
+                    self.xr_look();
                     self.kinetics_frame();
                     self.advance_flight();
                     self.tick_world_icon();

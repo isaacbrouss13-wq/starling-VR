@@ -66,10 +66,14 @@ wgpu = { version = "30.0.1", default-features = false, features = ["dx12"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
+# Starling VR (the `xr` feature): the headset, through OpenXR.
+starling-xr = { path = "../starling-xr", optional = true }
 
 [features]
 # Sound output: horizon-client's `audio` feature.
 audio = ["dep:cpal"]
+# Starling VR: the game in a Meta Quest through OpenXR (gfx/xr.rs). Starling VR's APK turns it on.
+xr = ["dep:starling-xr"]
 # Helpers horizon-client's tests build their fixtures with.
 test-support = []
 
