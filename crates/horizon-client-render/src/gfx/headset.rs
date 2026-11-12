@@ -84,11 +84,14 @@ pub struct Blit {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    cursor: wgpu::Buffer,
 }
 
 const BLIT_WGSL: &str = r"
 @group(0) @binding(0) var frame: texture_2d<f32>;
 @group(0) @binding(1) var bilinear: sampler;
+// Where a hand points (0..1 from the left and top), x negative for none.
+@group(0) @binding(2) var<uniform> cursor: vec4<f32>;
 struct Out { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 @vertex fn vs(@builtin(vertex_index) i: u32) -> Out {
     let uv = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
@@ -103,8 +106,18 @@ fn linear(c: vec3<f32>) -> vec3<f32> {
     return select(high, low, c <= vec3<f32>(0.04045));
 }
 @fragment fn fs(i: Out) -> @location(0) vec4<f32> {
-    let c = textureSample(frame, bilinear, i.uv);
-    return vec4<f32>(linear(c.rgb), 1.0);
+    var c = linear(textureSample(frame, bilinear, i.uv).rgb);
+    if (cursor.x >= 0.0) {
+        // A dot, round on the screen whatever its shape: white, ringed dark to show on white.
+        let size = vec2<f32>(textureDimensions(frame));
+        let d = length((i.uv - cursor.xy) * size) / size.y;
+        if (d < 0.009) {
+            c = vec3<f32>(1.0);
+        } else if (d < 0.013) {
+            c = vec3<f32>(0.02);
+        }
+    }
+    return vec4<f32>(c, 1.0);
 }
 ";
 
@@ -131,6 +144,16 @@ impl Blit {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
                     count: None,
                 },
             ],
@@ -171,21 +194,33 @@ impl Blit {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        let cursor = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Starling VR cursor"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         Self {
             pipeline,
             layout,
             sampler,
+            cursor,
         }
     }
 
-    /// Draws `frame` over all of `target`.
+    /// Draws `frame` over all of `target`, with a dot where a hand points (`cursor`: 0..1 from
+    /// the left and top).
     pub fn draw(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         frame: &wgpu::TextureView,
         target: &wgpu::TextureView,
+        cursor: Option<[f32; 2]>,
     ) {
+        let [x, y] = cursor.unwrap_or([-1.0, -1.0]);
+        queue.write_buffer(&self.cursor, 0, bytemuck::cast_slice(&[x, y, 0.0f32, 0.0]));
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Starling VR blit"),
             layout: &self.layout,
@@ -197,6 +232,10 @@ impl Blit {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.cursor.as_entire_binding(),
                 },
             ],
         });

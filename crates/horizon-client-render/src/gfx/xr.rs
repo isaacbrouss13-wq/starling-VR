@@ -10,10 +10,10 @@ use glam::Vec3;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub use starling_xr::{Controllers, buzz, controllers, exiting};
+pub use starling_xr::{Controllers, Pointer, SCREEN_PIXELS, buzz, controllers, exiting, pointer};
 pub(super) use starling_xr::{
-    Opened, SCREEN, SCREEN_PIXELS, acquire, end_empty, end_frame, end_frame_screen, hide_screen,
-    open, release, swapchain_format,
+    Opened, SCREEN, acquire, end_empty, end_frame, end_frame_screen, hide_screen, open, release,
+    swapchain_format,
 };
 
 static LOOK: Mutex<Look> = Mutex::new(Look::new());

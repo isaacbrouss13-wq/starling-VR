@@ -94,6 +94,8 @@ struct Input {
     triggers: [openxr::Action<f32>; 2],
     grips: [openxr::Action<f32>; 2],
     haptics: [openxr::Action<openxr::Haptic>; 2],
+    /// Where each hand points (right, left), and their spaces.
+    aims: [openxr::Space; 2],
 }
 
 struct Xr {
@@ -122,6 +124,8 @@ struct Xr {
 unsafe impl Send for Xr {}
 
 static XR: Mutex<Option<Xr>> = Mutex::new(None);
+/// Where a hand points at the flat screen while it shows (`pointer`).
+static POINTER: Mutex<Option<Pointer>> = Mutex::new(None);
 static CONTROLLERS: Mutex<Option<Controllers>> = Mutex::new(None);
 
 fn env_f32(name: &str, default: f32, range: std::ops::RangeInclusive<f32>) -> f32 {
@@ -152,6 +156,39 @@ pub fn buzz(hand: usize, amplitude: f32, millis: u32) {
         .frequency(openxr::FREQUENCY_UNSPECIFIED)
         .duration(openxr::Duration::from_nanos(i64::from(millis) * 1_000_000));
     let _ = input.haptics[hand.min(1)].apply_feedback(&xr.session, openxr::Path::NULL, &pulse);
+}
+
+/// A hand pointing at the flat screen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pointer {
+    /// 0 the right hand, 1 the left.
+    pub hand: usize,
+    /// Where on the screen: 0..1 from its left and from its top.
+    pub at: [f32; 2],
+}
+
+/// Where a hand points at the flat screen, this frame; `None` while neither does (or the screen
+/// isn't showing).
+pub fn pointer() -> Option<Pointer> {
+    *POINTER.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Where a ray from `origin` along `dir` meets a screen standing at `screen` (a quad facing its
+/// +Z, `size` metres): 0..1 from its left and top, or `None` when it misses or points away.
+pub fn hit_screen(origin: Vec3, dir: Vec3, screen: Pose, size: [f32; 2]) -> Option<[f32; 2]> {
+    let normal = screen.rotation * Vec3::Z;
+    let facing = dir.dot(normal);
+    // Only from in front (the ray going against the face).
+    if facing >= -1e-4 {
+        return None;
+    }
+    let t = (screen.position - origin).dot(normal) / facing;
+    if t <= 0.0 {
+        return None;
+    }
+    let local = screen.rotation.inverse() * (origin + dir * t - screen.position);
+    let at = [local.x / size[0] + 0.5, 0.5 - local.y / size[1]];
+    at.iter().all(|c| (0.0..=1.0).contains(c)).then_some(at)
 }
 
 /// Whether the headset asked the game to end (the player quit from the system menu).
@@ -559,6 +596,11 @@ fn make_input(
     let triggers = [value("left_trigger")?, value("right_trigger")?];
     let grips = [value("left_grip")?, value("right_grip")?];
     let haptics = [haptic("buzz_right")?, haptic("buzz_left")?];
+    let aim = |name: &str| {
+        set.create_action::<openxr::Posef>(name, name, &[])
+            .map_err(ctx("action"))
+    };
+    let aim_actions = [aim("aim_right")?, aim("aim_left")?];
     let path = |p: &str| instance.string_to_path(p).map_err(ctx("path"));
     let l = |p: &str| path(&format!("/user/hand/left/{p}"));
     let r = |p: &str| path(&format!("/user/hand/right/{p}"));
@@ -581,12 +623,19 @@ fn make_input(
                 openxr::Binding::new(&grips[1], r("input/squeeze/value")?),
                 openxr::Binding::new(&haptics[0], r("output/haptic")?),
                 openxr::Binding::new(&haptics[1], l("output/haptic")?),
+                openxr::Binding::new(&aim_actions[0], r("input/aim/pose")?),
+                openxr::Binding::new(&aim_actions[1], l("input/aim/pose")?),
             ],
         )
         .map_err(ctx("controller bindings"))?;
     session
         .attach_action_sets(&[&set])
         .map_err(ctx("attach actions"))?;
+    let space = |a: &openxr::Action<openxr::Posef>| {
+        a.create_space(session, openxr::Path::NULL, openxr::Posef::IDENTITY)
+            .map_err(ctx("hand space"))
+    };
+    let aims = [space(&aim_actions[0])?, space(&aim_actions[1])?];
     Ok(Input {
         set,
         left_stick,
@@ -595,6 +644,7 @@ fn make_input(
         triggers,
         grips,
         haptics,
+        aims,
     })
 }
 
@@ -667,7 +717,11 @@ impl Xr {
         if !self.focused {
             return Some(Controllers::default());
         }
-        self.session.sync_actions(&[(&input.set).into()]).ok()?;
+        if let Err(e) = self.session.sync_actions(&[(&input.set).into()]) {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| log::warn!("Starling VR: can't read the controllers: {e:?}"));
+            return None;
+        }
         let s = &self.session;
         let stick = |a: &openxr::Action<openxr::Vector2f>| {
             a.state(s, openxr::Path::NULL)
@@ -686,7 +740,7 @@ impl Xr {
                 .map_or(0.0, |v| v.current_state)
         };
         let b = &input.buttons;
-        Some(Controllers {
+        let state = Controllers {
             a: down(&b[0]),
             b: down(&b[1]),
             x: down(&b[2]),
@@ -698,7 +752,12 @@ impl Xr {
             right: stick(&input.right_stick),
             triggers: [value(&input.triggers[0]), value(&input.triggers[1])],
             grips: [value(&input.grips[0]), value(&input.grips[1])],
-        })
+        };
+        if state != Controllers::default() {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| log::info!("Starling VR: controllers in use ({state:?})"));
+        }
+        Some(state)
     }
 }
 
@@ -754,6 +813,31 @@ pub fn begin_frame() -> Res<Option<Frame>> {
             rotation: eyes[0].0.rotation,
             position: (eyes[0].0.position + eyes[1].0.position) / 2.0,
         });
+    let pointing = xr
+        .screen
+        .zip(xr.input.as_ref())
+        .and_then(|(screen, input)| {
+            let screen = pose(screen);
+            let triggers = controllers.map_or([0.0; 2], |c| [c.triggers[1], c.triggers[0]]);
+            // The hand whose trigger is held first, else the right, else the left.
+            let mut order = [0, 1];
+            if triggers[1] > triggers[0] {
+                order = [1, 0];
+            }
+            order.into_iter().find_map(|hand| {
+                let aim = input.aims[hand].locate(&xr.stage, time).ok()?;
+                if !aim
+                    .location_flags
+                    .contains(openxr::SpaceLocationFlags::ORIENTATION_VALID)
+                {
+                    return None;
+                }
+                let p = pose(aim.pose);
+                hit_screen(p.position, p.rotation * Vec3::NEG_Z, screen, SCREEN_SIZE)
+                    .map(|at| Pointer { hand, at })
+            })
+        });
+    *POINTER.lock().unwrap_or_else(|e| e.into_inner()) = pointing;
     Ok(Some(Frame {
         time,
         poses: [left, right],
@@ -865,6 +949,7 @@ pub fn hide_screen() {
     if let Some(xr) = XR.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
         xr.screen = None;
     }
+    *POINTER.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// Where the flat screen stands for a head at `head`: ahead of it at eye height, upright and
@@ -916,4 +1001,73 @@ pub fn swapchain_format() -> wgpu::TextureFormat {
         .map_or(wgpu::TextureFormat::Rgba8UnormSrgb, |v| {
             v.texture().format()
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SIZE: [f32; 2] = [2.0, 1.0];
+
+    fn screen_ahead() -> Pose {
+        // 2 m ahead of the origin, facing back at it (+Z toward the player).
+        Pose {
+            rotation: Quat::IDENTITY,
+            position: Vec3::new(0.0, 1.5, -2.0),
+        }
+    }
+
+    #[test]
+    fn pointing_at_a_screen_finds_the_spot() {
+        let hand = Vec3::new(0.0, 1.5, 0.0);
+        let at = hit_screen(hand, Vec3::NEG_Z, screen_ahead(), SIZE).unwrap();
+        assert!((at[0] - 0.5).abs() < 1e-5 && (at[1] - 0.5).abs() < 1e-5);
+        // Up and to the right: toward the top right corner (top is 0).
+        let at = hit_screen(hand, Vec3::new(0.45, 0.2, -1.0), screen_ahead(), SIZE).unwrap();
+        assert!(
+            (at[0] - 0.95).abs() < 1e-4 && (at[1] - 0.1).abs() < 1e-4,
+            "{at:?}"
+        );
+    }
+
+    #[test]
+    fn missing_or_pointing_away_is_none() {
+        let hand = Vec3::new(0.0, 1.5, 0.0);
+        assert_eq!(
+            hit_screen(hand, Vec3::new(1.0, 0.0, -1.0), screen_ahead(), SIZE),
+            None,
+            "beside it"
+        );
+        assert_eq!(
+            hit_screen(hand, Vec3::Z, screen_ahead(), SIZE),
+            None,
+            "behind the player"
+        );
+        let behind = Vec3::new(0.0, 1.5, -3.0);
+        assert_eq!(
+            hit_screen(behind, Vec3::Z, screen_ahead(), SIZE),
+            None,
+            "from behind the screen"
+        );
+    }
+
+    #[test]
+    fn a_turned_screen_is_hit_in_its_own_axes() {
+        // The screen to the right of the player, facing them: its left edge nearest the front.
+        let screen = Pose {
+            rotation: Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2),
+            position: Vec3::new(2.0, 1.5, 0.0),
+        };
+        let at = hit_screen(
+            Vec3::new(0.0, 1.5, 0.0),
+            Vec3::new(1.0, 0.0, -0.25),
+            screen,
+            SIZE,
+        )
+        .unwrap();
+        assert!(
+            (at[0] - 0.25).abs() < 1e-4 && (at[1] - 0.5).abs() < 1e-4,
+            "{at:?}"
+        );
+    }
 }

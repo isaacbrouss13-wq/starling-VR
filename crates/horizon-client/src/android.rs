@@ -825,7 +825,12 @@ mod input {
     pub fn pad_state() -> Option<(i32, PadState)> {
         #[cfg(feature = "xr")]
         if let Some(c) = horizon_client::gfx::xr::controllers() {
-            return Some((super::QUEST_PAD, super::quest_pad(&c)));
+            let mut pad = super::quest_pad(&c);
+            // The triggers click where a hand points at the flat screen, not the pad's.
+            if horizon_client::gfx::xr::pointer().is_some() {
+                pad.triggers = [0.0; 2];
+            }
+            return Some((super::QUEST_PAD, pad));
         }
         PADS.lock().unwrap_or_else(|e| e.into_inner()).active()
     }
@@ -834,7 +839,12 @@ mod input {
     pub fn take_mouse_events() -> Vec<MouseEvent> {
         let mut mouse = MOUSE.lock().unwrap_or_else(|e| e.into_inner());
         mouse.taken = true;
-        std::mem::take(&mut mouse.events)
+        #[allow(unused_mut)]
+        let mut events = std::mem::take(&mut mouse.events);
+        // A hand pointing at the headset's flat screen is a mouse too.
+        #[cfg(feature = "xr")]
+        super::vr_pointer::events(&mut events);
+        events
     }
 
     /// Whether a physical keyboard's key went down since the last call.
@@ -844,6 +854,59 @@ mod input {
 }
 
 pub use input::{MouseEvent, keyboard_used, pad_state, take_mouse_events};
+
+/// A hand pointing at the headset's flat screen (Starling VR), as a mouse: the pointer where the
+/// hand's ray meets the screen, the left button that hand's trigger.
+#[cfg(feature = "xr")]
+mod vr_pointer {
+    use super::MouseEvent;
+    use horizon_client::gfx::xr;
+    use std::sync::Mutex;
+    use winit::event::MouseButton;
+
+    /// A trigger pulled past this clicks; let back under the second, it lets go.
+    const PRESS: f32 = 0.6;
+    const RELEASE: f32 = 0.35;
+
+    #[derive(Default)]
+    struct State {
+        at: Option<[f32; 2]>,
+        down: bool,
+    }
+
+    static STATE: Mutex<State> = Mutex::new(State {
+        at: None,
+        down: false,
+    });
+
+    pub fn events(out: &mut Vec<MouseEvent>) {
+        let mut s = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(pointer) = xr::pointer() else {
+            if s.down {
+                out.push(MouseEvent::Button(MouseButton::Left, false));
+            }
+            *s = State::default();
+            return;
+        };
+        let [w, h] = xr::SCREEN_PIXELS;
+        let at = [pointer.at[0] * w as f32, pointer.at[1] * h as f32];
+        if s.at != Some(at) {
+            out.push(MouseEvent::Moved(f64::from(at[0]), f64::from(at[1])));
+            s.at = Some(at);
+        }
+        // Controllers' triggers are left then right; a pointer's hand is 0 for the right.
+        let trigger = xr::controllers().map_or(0.0, |c| c.triggers[1 - pointer.hand.min(1)]);
+        let down = if s.down {
+            trigger > RELEASE
+        } else {
+            trigger > PRESS
+        };
+        if down != s.down {
+            out.push(MouseEvent::Button(MouseButton::Left, down));
+            s.down = down;
+        }
+    }
+}
 
 /// The device id the Quest's controllers play as (no Android device has a negative one).
 pub const QUEST_PAD: i32 = -1000;

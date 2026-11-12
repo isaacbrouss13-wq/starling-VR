@@ -6437,8 +6437,20 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Starling VR image"),
             });
+        // The flat screen shows where a hand points at it.
+        let cursor = (image == xr::SCREEN)
+            .then(xr::pointer)
+            .flatten()
+            .map(|p| p.at);
         if let Some(blit) = &self.xr_blit {
-            blit.draw(&self.device, &mut encoder, &source, &target);
+            blit.draw(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &source,
+                &target,
+                cursor,
+            );
         }
         self.queue.submit([encoder.finish()]);
         xr::release(image)?;
