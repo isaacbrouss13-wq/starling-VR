@@ -2185,7 +2185,9 @@ impl Renderer {
                 describe_adapter(&renderer.adapter);
                 check_layers(&renderer.adapter, layers)?;
                 Opened {
-                    surface: if offscreen {
+                    // A headset draws offscreen and copies into its own images (`render_xr`):
+                    // never a window surface, the first renderer's or a rebuilt one's.
+                    surface: if offscreen || headset() {
                         None
                     } else {
                         let spare = renderer
