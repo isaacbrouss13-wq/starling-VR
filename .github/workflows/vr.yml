@@ -1,0 +1,74 @@
+name: vr
+# Starling VR for Meta Quest: one arm64 APK per push to starling, published as its own release
+# (vr-build-N, newest on top) so every build stays installable. Signed with the repository's test key
+# (packaging/android/vr-test.keystore) so each build installs over the last and keeps its files.
+# The APK holds no game files: players prepare those from their own copy.
+on:
+  push:
+    branches: [starling]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: vr-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Install the build-tools, platform and NDK build_apk.py pins
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
+            "build-tools;35.0.0" "platforms;android-36" "ndk;28.2.13676358" > /dev/null
+      - name: Install Rust for Android and cargo-ndk
+        run: |
+          rustup toolchain install stable --profile minimal --target aarch64-linux-android
+          rustup default stable
+          cargo install cargo-ndk --version 3.5.4 --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: vr-arm64
+      # The fast profile's codegen units take more than the runner's 16 GB: swap, three units at a time.
+      - name: Make room for the build
+        run: |
+          sudo swapoff -a || true
+          where=/mnt size=20G
+          avail=$(df --output=avail -BG "$where" 2>/dev/null | tail -1 | tr -dc 0-9)
+          if [ "${avail:-0}" -lt 30 ]; then where=$RUNNER_TEMP size=10G; fi
+          sudo fallocate -l "$size" "$where/release.swap"
+          sudo chmod 600 "$where/release.swap"
+          sudo mkswap "$where/release.swap" > /dev/null
+          sudo swapon "$where/release.swap"
+          echo "CARGO_BUILD_JOBS=3" >> "$GITHUB_ENV"
+      - name: Build the APK
+        env:
+          HORIZON_ANDROID_KEY_ALIAS: horizon-debug
+          HORIZON_ANDROID_STORE_PASSWORD: android
+          HORIZON_ANDROID_KEY_PASSWORD: android
+        run: |
+          export HORIZON_ANDROID_KEYSTORE="$GITHUB_WORKSPACE/packaging/android/vr-test.keystore"
+          python packaging/android/build_apk.py --abi arm64-v8a --profile fast --vr
+      - uses: actions/upload-artifact@v4
+        with:
+          name: starling-vr-apk
+          path: target/android/starling-*.apk
+          if-no-files-found: error
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD: ${{ github.run_number }}
+        run: |
+          apk=$(ls target/android/starling-*.apk | head -1)
+          cp "$apk" "starling-vr-build-$BUILD.apk"
+          git log -1 --format=%B > notes.md
+          gh release create "vr-build-$BUILD" "starling-vr-build-$BUILD.apk" \
+            --title "Starling VR build $BUILD" --notes-file notes.md --latest

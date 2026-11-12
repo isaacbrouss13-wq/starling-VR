@@ -31,8 +31,10 @@ fn account_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Starling's Azure app (a public client: its ID is no secret).
-pub const CLIENT_ID: &str = "f2719b6f-5617-4631-b2d7-a21defa191fc";
+/// The Azure app built in. Starling VR is an app of its own and never uses Starling's (as Horizon's
+/// sign-in rules ask of forks): its builds set `STARLING_VR_MSA_CLIENT_ID` at compile time once
+/// it has its own approved app, and have no Microsoft sign-in until then.
+pub const CLIENT_ID: Option<&str> = option_env!("STARLING_VR_MSA_CLIENT_ID");
 /// The only scopes the app was approved for.
 const SCOPE: &str = "XboxLive.signin offline_access";
 const SIGN_IN_AGAIN: &str = "Your Microsoft sign-in expired. Sign in again.";
@@ -44,7 +46,9 @@ const RENEW_BEFORE: u64 = 3600;
 pub fn client_id() -> Option<String> {
     match std::env::var("STARLING_MSA_CLIENT_ID") {
         Ok(id) => Some(id.trim().to_owned()).filter(|id| !id.is_empty()),
-        Err(_) => Some(CLIENT_ID.to_owned()),
+        // Tests sign in against stand-in servers: any ID will do there.
+        Err(_) if cfg!(test) => Some(CLIENT_ID.unwrap_or("test-app").to_owned()),
+        Err(_) => CLIENT_ID.map(str::to_owned).filter(|id| !id.trim().is_empty()),
     }
 }
 

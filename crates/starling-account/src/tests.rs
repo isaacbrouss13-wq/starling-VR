@@ -464,9 +464,10 @@ fn the_session_renews_and_saves_itself() {
 }
 
 #[test]
-fn the_app_is_starlings_and_asks_for_two_scopes() {
+fn the_app_is_starling_vrs_own_and_asks_for_two_scopes() {
     if std::env::var_os("STARLING_MSA_CLIENT_ID").is_none() {
-        assert_eq!(client_id().as_deref(), Some(CLIENT_ID));
+        // Never Starling's app: only the one this build was given, or none.
+        assert_ne!(client_id().as_deref(), Some("f2719b6f-5617-4631-b2d7-a21defa191fc"));
     }
     assert_eq!(SCOPE, "XboxLive.signin offline_access");
     assert!(Endpoints::live().microsoft.contains("/consumers/"));

@@ -147,7 +147,8 @@ public class StarlingActivity extends NativeActivity {
                 : context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
                         == PackageManager.PERMISSION_GRANTED;
         String id = context.getPackageName();
-        String name = id.endsWith(".dev") ? "StarlingDev"
+        String name = id.endsWith(".vr") ? "StarlingVR"
+                : id.endsWith(".dev") ? "StarlingDev"
                 : id.endsWith(".preview") ? "StarlingPreview" : "Starling";
         return allowed
                 ? new File(Environment.getExternalStorageDirectory(), name).getPath()
