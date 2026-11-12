@@ -222,6 +222,24 @@ impl Blit {
     }
 }
 
+/// Memory, for a headset's log (Starling VR): what the system has free and what the game holds,
+/// from Linux's /proc (Android's too). A Quest shares its memory with the headset's own system,
+/// and Android ends a game that takes too much without a word in the game's own log.
+pub fn memory_note() -> String {
+    let field = |path: &str, name: &str| -> Option<u64> {
+        let text = std::fs::read_to_string(path).ok()?;
+        let line = text.lines().find(|l| l.starts_with(name))?;
+        line.split_whitespace().nth(1)?.parse().ok()
+    };
+    let mb = |kb: Option<u64>| kb.map_or_else(|| "?".to_owned(), |kb| format!("{} MB", kb / 1024));
+    format!(
+        "system free {}, of {}; game {} (GPU memory not counted)",
+        mb(field("/proc/meminfo", "MemAvailable:")),
+        mb(field("/proc/meminfo", "MemTotal:")),
+        mb(field("/proc/self/status", "VmRSS:")),
+    )
+}
+
 /// A place and a turn in the play area (metres; its floor at y = 0, -Z its forward).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pose {

@@ -1021,6 +1021,40 @@ mod vr_log {
     use std::sync::Mutex;
 
     static FILE: Mutex<Option<std::fs::File>> = Mutex::new(None);
+    /// The log's file descriptor, for `on_signal`, which may not lock or allocate.
+    static FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+    unsafe extern "C" {
+        fn signal(signum: std::ffi::c_int, handler: usize) -> usize;
+        fn raise(signum: std::ffi::c_int) -> std::ffi::c_int;
+        fn write(fd: std::ffi::c_int, buf: *const u8, count: usize) -> isize;
+    }
+
+    /// The signals a crash in native code (the graphics driver's) ends the game with, and their
+    /// lines in the log. A game Android ends for its memory gets none: no line means that.
+    const SIGNALS: [(std::ffi::c_int, &str); 5] = [
+        (4, "CRASH native: illegal instruction (SIGILL)\n"),
+        (6, "CRASH native: abort (SIGABRT)\n"),
+        (7, "CRASH native: bus error (SIGBUS)\n"),
+        (8, "CRASH native: arithmetic (SIGFPE)\n"),
+        (11, "CRASH native: bad memory access (SIGSEGV)\n"),
+    ];
+
+    extern "C" fn on_signal(signum: std::ffi::c_int) {
+        let fd = FD.load(std::sync::atomic::Ordering::Relaxed);
+        if let Some((_, text)) = SIGNALS.iter().find(|(n, _)| *n == signum)
+            && fd >= 0
+        {
+            // SAFETY: write(2) is async-signal-safe; the text is static.
+            unsafe { write(fd, text.as_ptr(), text.len()) };
+        }
+        // SAFETY: back to the default action (SIG_DFL, 0), then the signal again: the crash
+        // goes on as it would have.
+        unsafe {
+            signal(signum, 0);
+            raise(signum);
+        }
+    }
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
     pub fn start(folder: Option<std::path::PathBuf>) {
@@ -1030,7 +1064,13 @@ mod vr_log {
             let path = folder.join("starling-vr-log.txt");
             let _ = std::fs::rename(&path, folder.join("starling-vr-log-previous.txt"));
             if let Ok(file) = std::fs::File::create(&path) {
+                use std::os::fd::AsRawFd;
+                FD.store(file.as_raw_fd(), std::sync::atomic::Ordering::Relaxed);
                 *FILE.lock().unwrap_or_else(|e| e.into_inner()) = Some(file);
+                for (signum, _) in SIGNALS {
+                    // SAFETY: installs a handler that only writes a static line and re-raises.
+                    unsafe { signal(signum, on_signal as extern "C" fn(std::ffi::c_int) as usize) };
+                }
             }
         }
         crate::logging::set_console(console);

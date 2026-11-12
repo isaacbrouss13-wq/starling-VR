@@ -27,6 +27,16 @@ pub fn active() -> bool {
     starling_xr::active()
 }
 
+/// Logs the memory every few seconds (`headset::memory_note`).
+pub(super) fn note_memory_now_and_then() {
+    static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if last.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(5)) {
+        *last = Some(std::time::Instant::now());
+        log::info!("Starling VR: memory: {}", headset::memory_note());
+    }
+}
+
 /// Whether the next frames show on a flat screen floating in front of the player (the title,
 /// setup, loading and any menu: what isn't the world around them) or in the eyes. The game says
 /// each frame.

@@ -2304,6 +2304,14 @@ impl Renderer {
         if previous.is_none() {
             startup_step(format_args!("creating the pipelines"));
         }
+        // A headset's log follows a rebuild step by step, with the memory it takes: a game Android
+        // ends for its memory leaves no other trace there.
+        let headset_step = |step: &str| {
+            if headset() {
+                log::info!("Starling VR: renderer {step} ({})", headset::memory_note());
+            }
+        };
+        headset_step("targets made");
         // A renderer on the same device takes the previous one's shader
         // modules, layouts and pipelines where they come out the same.
         let reuse = previous.map_or_else(Default::default, |r| r.reuse.clone());
@@ -3021,6 +3029,7 @@ impl Renderer {
             &glint_sampler,
         )?;
         hud.atlas_texture = Some(atlas.clone());
+        headset_step("textures and terrain pipelines made");
         let entity_step = crate::spans::startup::step("renderer.entity_pipelines");
         let entity_shader = kept.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Horizon entities"),
@@ -4148,6 +4157,7 @@ impl Renderer {
                 reuse.len()
             );
         }
+        headset_step("ready");
         if previous.is_none() {
             startup_step(format_args!(
                 "pipelines ready (multi-draw {}, occlusion culling {}, GPU timer {})",
@@ -6338,6 +6348,7 @@ impl Renderer {
             let Some(views) = xr::begin_frame(frame.depth_far)? else {
                 return Ok(false);
             };
+            xr::note_memory_now_and_then();
             if self.xr_blit.is_none() {
                 self.xr_blit = Some(headset::Blit::new(&self.device, xr::swapchain_format()));
             }
