@@ -8,19 +8,34 @@ use super::headset::{self, Look, Pose};
 use super::view::{Fov, View};
 use glam::Vec3;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use starling_xr::{Controllers, buzz, controllers, exiting};
 pub(super) use starling_xr::{
-    Opened, acquire, end_empty, end_frame, open, release, swapchain_format,
+    Opened, SCREEN, SCREEN_PIXELS, acquire, end_empty, end_frame, end_frame_screen, hide_screen,
+    open, release, swapchain_format,
 };
 
 static LOOK: Mutex<Look> = Mutex::new(Look::new());
+/// The frame shows on the flat screen (`set_flat`), not in the eyes.
+static FLAT: AtomicBool = AtomicBool::new(true);
 /// Where the head stood when play began (or the play area was recentred): the view leans from here.
 static ANCHOR: Mutex<Option<Vec3>> = Mutex::new(None);
 
 /// Whether the game runs in the headset.
 pub fn active() -> bool {
     starling_xr::active()
+}
+
+/// Whether the next frames show on a flat screen floating in front of the player (the title,
+/// setup, loading and any menu: what isn't the world around them) or in the eyes. The game says
+/// each frame.
+pub fn set_flat(flat: bool) {
+    FLAT.store(flat, Ordering::Relaxed);
+}
+
+pub(super) fn flat() -> bool {
+    FLAT.load(Ordering::Relaxed)
 }
 
 /// The player's yaw and pitch for this frame from the head, given the yaw the game has now: `None`

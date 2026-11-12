@@ -4629,6 +4629,10 @@ impl Renderer {
         if headset() {
             return;
         }
+        self.resize_targets(width, height);
+    }
+    /// Sizes the frame's targets (`resize`), or a headset's flat screen or eyes (`render_xr`).
+    fn resize_targets(&mut self, width: u32, height: u32) {
         let max = self.device.limits().max_texture_dimension_2d;
         self.suspended = !drawable_size(width, height, max);
         if self.suspended {
@@ -6335,31 +6339,46 @@ impl Renderer {
             if self.xr_blit.is_none() {
                 self.xr_blit = Some(headset::Blit::new(&self.device, xr::swapchain_format()));
             }
+            // The flat screen: the frame as on a phone, on a screen in front of the player.
+            if xr::flat() {
+                self.xr_cull = None;
+                let [w, h] = xr::SCREEN_PIXELS;
+                if [self.config.width, self.config.height] != [w, h] {
+                    self.resize_targets(w, h);
+                }
+                let shown = self
+                    .draw_frame(frame, None)
+                    .and_then(|drawn| -> Result<bool> {
+                        self.copy_to_headset(xr::SCREEN)?;
+                        Ok(drawn)
+                    });
+                return match shown {
+                    Ok(drawn) => {
+                        xr::end_frame_screen(&views.frame)?;
+                        Ok(drawn)
+                    }
+                    Err(e) => {
+                        xr::end_empty(&views.frame);
+                        Err(e)
+                    }
+                };
+            }
+            xr::hide_screen();
+            let eye_size = *HEADSET_SIZE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some([w, h]) = eye_size
+                && [self.config.width, self.config.height] != [w, h]
+            {
+                self.resize_targets(w, h);
+            }
             let mut result = Ok(false);
             for eye in 0..2 {
                 self.xr_views = Some(ViewSet::eye(views.eyes[eye], views.cull));
                 let drawn = self.draw_frame(frame, None);
                 self.xr_views = None;
                 let copied = drawn.and_then(|drawn| -> Result<bool> {
-                    let target = xr::acquire(eye)?;
-                    let source = self
-                        .offscreen
-                        .as_ref()
-                        .ok_or("no offscreen target")?
-                        .create_view(&wgpu::TextureViewDescriptor {
-                            format: Some(self.config.format.remove_srgb_suffix()),
-                            ..Default::default()
-                        });
-                    let mut encoder =
-                        self.device
-                            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                label: Some("Starling VR eye"),
-                            });
-                    if let Some(blit) = &self.xr_blit {
-                        blit.draw(&self.device, &mut encoder, &source, &target);
-                    }
-                    self.queue.submit([encoder.finish()]);
-                    xr::release(eye)?;
+                    self.copy_to_headset(eye)?;
                     Ok(drawn)
                 });
                 result = match (result, copied) {
@@ -6387,6 +6406,30 @@ impl Renderer {
             let _ = frame;
             Ok(false)
         }
+    }
+    /// Copies the frame just drawn into the headset's image `image` (an eye, or the flat screen).
+    #[cfg(feature = "xr")]
+    fn copy_to_headset(&mut self, image: usize) -> Result<()> {
+        let target = xr::acquire(image)?;
+        let source = self
+            .offscreen
+            .as_ref()
+            .ok_or("no offscreen target")?
+            .create_view(&wgpu::TextureViewDescriptor {
+                format: Some(self.config.format.remove_srgb_suffix()),
+                ..Default::default()
+            });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Starling VR image"),
+            });
+        if let Some(blit) = &self.xr_blit {
+            blit.draw(&self.device, &mut encoder, &source, &target);
+        }
+        self.queue.submit([encoder.finish()]);
+        xr::release(image)?;
+        Ok(())
     }
     fn draw_scaled_frame(&mut self, frame: &Frame, size: [u32; 2]) -> Result<bool> {
         let window = [self.config.width, self.config.height];

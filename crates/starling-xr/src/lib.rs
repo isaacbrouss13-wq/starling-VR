@@ -22,6 +22,13 @@ fn ctx<E: std::fmt::Debug>(what: &'static str) -> impl FnOnce(E) -> String {
 /// How much of the headset's recommended eye resolution the game draws at
 /// (`STARLING_VR_SCALE`, 0.4 to 1.5): less for a steadier frame rate.
 const DEFAULT_SCALE: f32 = 0.8;
+/// The flat screen menus, the title and loading show on (`end_frame_screen`): its pixels, and
+/// its size and distance in front of the player, metres.
+pub const SCREEN_PIXELS: [u32; 2] = [1600, 900];
+const SCREEN_SIZE: [f32; 2] = [2.4, 1.35];
+const SCREEN_DISTANCE: f32 = 2.2;
+/// The images `acquire` hands out: the two eyes', then the flat screen's.
+pub const SCREEN: usize = 2;
 /// The display refresh rate asked for, Hz (`STARLING_VR_HZ`).
 const DEFAULT_HZ: f32 = 72.0;
 /// A headset lens's edges as angles from the eye's forward axis, in radians (`XrFovf`): `left`
@@ -96,8 +103,12 @@ struct Xr {
     stream: openxr::FrameStream<openxr::Vulkan>,
     stage: openxr::Space,
     head_space: openxr::Space,
-    eyes: [Eye; 2],
+    /// The eyes' swapchains, then the flat screen's (`SCREEN`).
+    eyes: [Eye; 3],
     swapchain_size: [u32; 2],
+    /// Where the flat screen stands in the play area while it shows: placed in front of the
+    /// player when it appears.
+    screen: Option<openxr::Posef>,
     input: Option<Input>,
     events: openxr::EventDataBuffer,
     running: bool,
@@ -393,7 +404,7 @@ pub fn open(features: impl Fn(&wgpu::Adapter) -> wgpu::Features) -> Res<Opened> 
         size[0],
         size[1]
     );
-    let make_eye = || -> Res<Eye> {
+    let make_eye = |swapchain_size: [u32; 2]| -> Res<Eye> {
         let swapchain = session
             .create_swapchain(&openxr::SwapchainCreateInfo {
                 create_flags: openxr::SwapchainCreateFlags::EMPTY,
@@ -462,7 +473,11 @@ pub fn open(features: impl Fn(&wgpu::Adapter) -> wgpu::Features) -> Res<Opened> 
             current: None,
         })
     };
-    let eyes = [make_eye()?, make_eye()?];
+    let eyes = [
+        make_eye(swapchain_size)?,
+        make_eye(swapchain_size)?,
+        make_eye(SCREEN_PIXELS)?,
+    ];
     // The play area, its floor at y = 0; a standing-only fallback.
     let stage = session
         .create_reference_space(openxr::ReferenceSpaceType::STAGE, openxr::Posef::IDENTITY)
@@ -491,6 +506,7 @@ pub fn open(features: impl Fn(&wgpu::Adapter) -> wgpu::Features) -> Res<Opened> 
         head_space,
         eyes,
         swapchain_size,
+        screen: None,
         input,
         events: openxr::EventDataBuffer::new(),
         running: false,
@@ -632,7 +648,10 @@ impl Xr {
                         _ => {}
                     }
                 }
-                ReferenceSpaceChangePending(_) => self.recentred = true,
+                ReferenceSpaceChangePending(_) => {
+                    self.recentred = true;
+                    self.screen = None;
+                }
                 InstanceLossPending(_) => {
                     self.running = false;
                     self.exiting = true;
@@ -805,6 +824,72 @@ pub fn end_frame(frame: &Frame) -> Res<()> {
     xr.stream
         .end(frame.time, openxr::EnvironmentBlendMode::OPAQUE, &[&layer])
         .map_err(ctx("end the frame"))
+}
+
+/// Shows the flat screen's image (`acquire(SCREEN)`), floating in front of the player: placed
+/// where they look when it appears, then still while it shows, as a real screen would be.
+pub fn end_frame_screen(frame: &Frame) -> Res<()> {
+    let mut guard = XR.lock().unwrap_or_else(|e| e.into_inner());
+    let xr = guard.as_mut().ok_or("no headset")?;
+    let pose = *xr.screen.get_or_insert_with(|| screen_pose(frame.head));
+    let [w, h] = SCREEN_PIXELS;
+    let rect = openxr::Rect2Di {
+        offset: openxr::Offset2Di { x: 0, y: 0 },
+        extent: openxr::Extent2Di {
+            width: w as i32,
+            height: h as i32,
+        },
+    };
+    let layer = openxr::CompositionLayerQuad::new()
+        .space(&xr.stage)
+        .eye_visibility(openxr::EyeVisibility::BOTH)
+        .pose(pose)
+        .size(openxr::Extent2Df {
+            width: SCREEN_SIZE[0],
+            height: SCREEN_SIZE[1],
+        })
+        .sub_image(
+            openxr::SwapchainSubImage::new()
+                .swapchain(&xr.eyes[SCREEN].swapchain)
+                .image_array_index(0)
+                .image_rect(rect),
+        );
+    xr.stream
+        .end(frame.time, openxr::EnvironmentBlendMode::OPAQUE, &[&layer])
+        .map_err(ctx("end the frame"))
+}
+
+/// The flat screen goes away (the game is played in the headset): the next shows in front of
+/// the player again.
+pub fn hide_screen() {
+    if let Some(xr) = XR.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        xr.screen = None;
+    }
+}
+
+/// Where the flat screen stands for a head at `head`: ahead of it at eye height, upright and
+/// facing it.
+fn screen_pose(head: Pose) -> openxr::Posef {
+    let forward = head.rotation * Vec3::NEG_Z;
+    let flat = Vec3::new(forward.x, 0.0, forward.z)
+        .try_normalize()
+        .unwrap_or(Vec3::NEG_Z);
+    let centre = head.position + flat * SCREEN_DISTANCE;
+    // A quad faces its +Z: turned to face back along `flat`.
+    let turn = Quat::from_rotation_arc(Vec3::Z, -flat);
+    openxr::Posef {
+        orientation: openxr::Quaternionf {
+            x: turn.x,
+            y: turn.y,
+            z: turn.z,
+            w: turn.w,
+        },
+        position: openxr::Vector3f {
+            x: centre.x,
+            y: centre.y,
+            z: centre.z,
+        },
+    }
 }
 
 /// Ends a frame `begin_frame` began without showing anything (a frame that failed to draw).

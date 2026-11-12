@@ -1011,6 +1011,63 @@ fn command_line(home: &Path) -> (Vec<String>, Vec<(String, String)>) {
 }
 
 /// The game's console lines in logcat, under the tag `starling`.
+/// Starling VR's log in a place a player can open from a computer (SideQuest's file manager,
+/// `Android/data/<the app>/files/starling-vr-log.txt`): everything logcat gets, and a crash's
+/// message. In a headset there is no screen to read an error on, and the game folder may be the
+/// app's private one. The last run's is kept beside it (`starling-vr-log-previous.txt`).
+#[cfg(feature = "xr")]
+mod vr_log {
+    use std::io::Write;
+    use std::sync::Mutex;
+
+    static FILE: Mutex<Option<std::fs::File>> = Mutex::new(None);
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+    pub fn start(folder: Option<std::path::PathBuf>) {
+        START.get_or_init(std::time::Instant::now);
+        if let Some(folder) = folder {
+            let _ = std::fs::create_dir_all(&folder);
+            let path = folder.join("starling-vr-log.txt");
+            let _ = std::fs::rename(&path, folder.join("starling-vr-log-previous.txt"));
+            if let Ok(file) = std::fs::File::create(&path) {
+                *FILE.lock().unwrap_or_else(|e| e.into_inner()) = Some(file);
+            }
+        }
+        crate::logging::set_console(console);
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let thread = std::thread::current();
+            line(
+                "CRASH",
+                &format!(
+                    "thread '{}' panicked: {info}\n{}",
+                    thread.name().unwrap_or("unnamed"),
+                    std::backtrace::Backtrace::force_capture()
+                ),
+            );
+            previous(info);
+        }));
+        line(
+            "INFO",
+            &format!("Starling VR {}", env!("CARGO_PKG_VERSION")),
+        );
+    }
+
+    fn line(level: &str, message: &str) {
+        let mut file = FILE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(f) = file.as_mut() {
+            let since = START.get().map_or(0.0, |t| t.elapsed().as_secs_f64());
+            let _ = writeln!(f, "[{since:9.3}] {level:5} {message}");
+            let _ = f.flush();
+        }
+    }
+
+    fn console(level: log::Level, message: &str) {
+        super::logcat(level, message);
+        line(level.as_str(), message);
+    }
+}
+
 fn logcat(level: log::Level, message: &str) {
     use std::ffi::CString;
     let priority = match level {
@@ -1310,6 +1367,9 @@ pub fn main(app: AndroidApp) {
             &format!("Horizon: cannot enter {}: {e}", home.display()),
         );
     }
+    #[cfg(feature = "xr")]
+    vr_log::start(app.external_data_path());
+    #[cfg(not(feature = "xr"))]
     logging::set_console(logcat);
     crate::system_stats::set_probes(crate::system_stats::Probes {
         heap_bytes,

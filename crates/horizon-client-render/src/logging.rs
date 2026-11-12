@@ -480,7 +480,8 @@ pub fn set_console(console: fn(log::Level, &str)) {
 }
 
 fn ours(target: &str) -> bool {
-    target.starts_with("horizon")
+    // Starling's own crates (starling-xr...) are the game's too.
+    target.starts_with("horizon") || target.starts_with("starling")
 }
 
 impl log::Log for Logger {
