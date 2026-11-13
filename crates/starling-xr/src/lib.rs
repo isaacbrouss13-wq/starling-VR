@@ -117,6 +117,17 @@ struct Xr {
     focused: bool,
     exiting: bool,
     recentred: bool,
+    /// The speed last asked of the headset's CPU and GPU (`set_speed`): loading or playing.
+    speed: Option<Speed>,
+}
+
+/// What the headset's CPU and GPU are asked to run at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Speed {
+    /// Starting, setting up, loading and menus: the CPU boosted (Meta's advice for loading).
+    Loading,
+    /// Playing: both held high, for a steady frame rate.
+    Playing,
 }
 
 // Safety: the OpenXR handles are used from the game's thread only (all of this module's calls
@@ -247,6 +258,7 @@ pub fn open(features: impl Fn(&wgpu::Adapter) -> wgpu::Features) -> Res<Opened> 
         wanted.khr_android_create_instance = available.khr_android_create_instance;
     }
     wanted.fb_display_refresh_rate = available.fb_display_refresh_rate;
+    wanted.ext_performance_settings = available.ext_performance_settings;
     let app = openxr::ApplicationInfo {
         application_name: "Starling VR",
         application_version: 1,
@@ -550,6 +562,7 @@ pub fn open(features: impl Fn(&wgpu::Adapter) -> wgpu::Features) -> Res<Opened> 
         focused: false,
         exiting: false,
         recentred: false,
+        speed: None,
     });
     Ok(Opened {
         instance: instance_wgpu,
@@ -761,14 +774,42 @@ impl Xr {
     }
 }
 
+impl Xr {
+    /// Asks the CPU and GPU for `speed` (XR_EXT_performance_settings), when it changes. A Quest
+    /// otherwise runs an app slower to save power, which makes loading drag.
+    fn set_speed(&mut self, speed: Speed) {
+        if self.speed == Some(speed) || !self.running {
+            return;
+        }
+        self.speed = Some(speed);
+        let Some(ext) = self.instance.exts().ext_performance_settings else {
+            return;
+        };
+        use openxr::sys::{PerfSettingsDomainEXT as Domain, PerfSettingsLevelEXT as Level};
+        let cpu = match speed {
+            Speed::Loading => Level::BOOST,
+            Speed::Playing => Level::SUSTAINED_HIGH,
+        };
+        for (domain, level) in [(Domain::CPU, cpu), (Domain::GPU, Level::SUSTAINED_HIGH)] {
+            // Safety: the session's own handle and the extension's function, enabled on it.
+            let result = unsafe {
+                (ext.perf_settings_set_performance_level)(self.session.as_raw(), domain, level)
+            };
+            log::info!("Starling VR: {domain:?} at {level:?} for {speed:?}: {result:?}");
+        }
+    }
+}
+
 /// Waits for the headset's next frame and locates the eyes: `None` when there is none to draw
 /// (the session not running, or the runtime skipping one).
-pub fn begin_frame() -> Res<Option<Frame>> {
+pub fn begin_frame(speed: Speed) -> Res<Option<Frame>> {
     let mut guard = XR.lock().unwrap_or_else(|e| e.into_inner());
     let Some(xr) = guard.as_mut() else {
         return Ok(None);
     };
-    if !xr.poll()? {
+    let running = xr.poll()?;
+    xr.set_speed(speed);
+    if !running {
         drop(guard);
         // No frame loop to pace the game: about one frame's time.
         std::thread::sleep(Duration::from_millis(14));

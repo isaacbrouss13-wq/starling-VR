@@ -29,6 +29,18 @@ pub fn active() -> bool {
 
 /// Logs the memory every few seconds (`headset::memory_note`).
 pub(super) fn note_memory_now_and_then() {
+    // A long wait between frames is a freeze in the headset: the log says how long.
+    static FRAME: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    let now = std::time::Instant::now();
+    if let Some(gap) = FRAME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .replace(now)
+        .map(|t| now - t)
+        .filter(|gap| *gap >= std::time::Duration::from_millis(500))
+    {
+        log::info!("Starling VR: no frame for {} ms", gap.as_millis());
+    }
     static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
     let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
     if last.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(5)) {
@@ -81,7 +93,13 @@ fn fov(l: starling_xr::Lens) -> Fov {
 
 /// Waits for the headset's next frame: `None` when there is none to draw.
 pub(super) fn begin_frame(far: f32) -> Result<Option<FrameViews>, String> {
-    let Some(frame) = starling_xr::begin_frame()? else {
+    // A flat screen is the title, setup, loading or a menu: boosted, for loading's sake.
+    let speed = if flat() {
+        starling_xr::Speed::Loading
+    } else {
+        starling_xr::Speed::Playing
+    };
+    let Some(frame) = starling_xr::begin_frame(speed)? else {
         return Ok(None);
     };
     let head = pose(frame.head);
