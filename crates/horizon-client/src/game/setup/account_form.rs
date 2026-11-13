@@ -75,6 +75,23 @@ impl Form {
         #[cfg(target_os = "android")]
         horizon_client::android::hide_text_mirror();
     }
+    /// A field has the focus (a keyboard types into it).
+    pub fn focused(&self) -> bool {
+        self.focus.is_some()
+    }
+    /// Text typed on the on-screen keyboard (Starling VR's), into the field with the focus.
+    pub fn type_text(&mut self, text: &str) {
+        let secret = self.secret();
+        if let Some(i) = self.focus {
+            let f = &mut self.fields[i];
+            if secret {
+                f.insert_password(text)
+            } else {
+                f.insert_text(text)
+            }
+            self.sync(false);
+        }
+    }
     pub fn reveal(&mut self) {
         self.show_password = !self.show_password;
     }

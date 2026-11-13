@@ -138,7 +138,17 @@ pub(super) struct Setup {
     fishing_open: bool,
     /// The low-budget skin put on the menus, once.
     skinned: bool,
+    /// The skin loading on a thread of its own: building its atlas takes many seconds on a
+    /// phone or a headset, which on this thread would stop every frame (a headset's view froze
+    /// for 20 s, Starling VR's log).
+    skin_loading: Option<std::sync::mpsc::Receiver<SkinLoaded>>,
+    /// In a headset, Horizon's on-screen keyboard for the form's fields: Android's own can't
+    /// show over a headset's view (`setup_keyboard`).
+    osk: Option<horizon_client::osk::Keyboard>,
 }
+
+/// The low-budget skin's menu resources, or why they did not load.
+type SkinLoaded = Option<(Result<UiResources, String>, std::path::PathBuf)>;
 
 impl Setup {
     /// How soon the screen draws again: often while the water or the settings show.
@@ -487,11 +497,35 @@ impl Loading {
         // The menus in the skin the app carries: their own resources are what is missing.
         if !self.setup.skinned {
             self.setup.skinned = true;
-            if let Some(root) = preparer::skin() {
-                match UiResources::load(&root, &root) {
-                    Ok(gui) => self.set_ui(gui, root),
-                    Err(e) => log::warn!("Horizon: the setup's skin did not load: {e}"),
-                }
+            let (send, receive) = std::sync::mpsc::channel();
+            let started = std::thread::Builder::new()
+                .name("setup skin".into())
+                .spawn(move || {
+                    let loaded = preparer::skin().map(|root| {
+                        (
+                            UiResources::load(&root, &root).map_err(|e| e.to_string()),
+                            root,
+                        )
+                    });
+                    let _ = send.send(loaded);
+                });
+            match started {
+                Ok(_) => self.setup.skin_loading = Some(receive),
+                Err(e) => log::warn!("Horizon: the setup's skin did not load: {e}"),
+            }
+        }
+        self.setup_keyboard();
+        if let Some(loaded) = self
+            .setup
+            .skin_loading
+            .as_ref()
+            .and_then(|r| r.try_recv().ok())
+        {
+            self.setup.skin_loading = None;
+            match loaded {
+                Some((Ok(gui), root)) => self.set_ui(gui, root),
+                Some((Err(e), _)) => log::warn!("Horizon: the setup's skin did not load: {e}"),
+                None => {}
             }
         }
         if preparer::stage() == Stage::Done {
@@ -547,6 +581,9 @@ impl Loading {
                 &horizon_client::lang::get("starling.diagnostics.title"),
             );
             drawn[4] = Some((rect, Action::Diagnostics));
+            if let Some(keyboard) = &self.setup.osk {
+                keyboard.draw(&mut ui, false, Default::default());
+            }
             ui.finish();
             self.setup.buttons.set(drawn);
             self.setup.pond.set(None);
@@ -782,6 +819,46 @@ impl Loading {
         false
     }
 
+    /// In a headset the on-screen keyboard shows while a field of the form has the focus.
+    fn setup_keyboard(&mut self) {
+        #[cfg(feature = "xr")]
+        let headset = horizon_client::gfx::xr::active();
+        #[cfg(not(feature = "xr"))]
+        let headset = false;
+        let typing = headset && self.setup.form.as_ref().is_some_and(|f| f.focused());
+        if typing != self.setup.osk.is_some() {
+            self.setup.osk = typing.then(Default::default);
+        }
+    }
+
+    /// A finger on the on-screen keyboard (`setup_keyboard`): lifted on a key, the key types
+    /// into the form. True when the keyboard took the touch.
+    fn setup_keyboard_touch(&mut self, phase: TouchPhase, p: [f32; 2]) -> bool {
+        let Some(keyboard) = self.setup.osk.as_mut() else {
+            return false;
+        };
+        if !keyboard.covers(p[0], p[1]) {
+            return false;
+        }
+        if phase != TouchPhase::Ended {
+            return true;
+        }
+        let Some(Some(output)) = keyboard.click(p[0], p[1]) else {
+            return true;
+        };
+        let Some(form) = self.setup.form.as_mut() else {
+            return true;
+        };
+        use horizon_client::osk::Output;
+        match output {
+            Output::Text(text) => form.type_text(&text),
+            Output::Backspace => form.key(winit::keyboard::KeyCode::Backspace, None, false, false),
+            // Done: the field lets go, and the form's own button sends it.
+            Output::Enter | Output::Close => form.hide(),
+        }
+        true
+    }
+
     /// A finger lifted on a button acts.
     pub(super) fn setup_touch(&mut self, touch: &Touch) {
         let Some(window) = &self.window else { return };
@@ -799,6 +876,9 @@ impl Loading {
             touch.location.x as f32 / density,
             touch.location.y as f32 / density,
         ];
+        if self.setup_keyboard_touch(touch.phase, p) {
+            return;
+        }
         let inside = |r: [f32; 4]| {
             p[0] >= r[0] && p[0] <= r[0] + r[2] && p[1] >= r[1] && p[1] <= r[1] + r[3]
         };

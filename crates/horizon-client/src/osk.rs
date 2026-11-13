@@ -298,6 +298,23 @@ impl Keyboard {
             .map(|col| (row as usize, col))
     }
 
+    /// Whether `(x, y)` (GUI pixels) is on the keyboard's plate, keys or not, as last drawn.
+    pub fn covers(&self, x: f32, y: f32) -> bool {
+        let Some((x0, y0)) = self.drawn.get() else {
+            return false;
+        };
+        let (width, height) = Self::size();
+        x >= x0 - 12.0 && x <= x0 + width + 12.0 && y >= y0 - 12.0 && y <= y0 - 12.0 + height
+    }
+
+    /// The keys' width and the plate's height, GUI pixels.
+    fn size() -> (f32, f32) {
+        (
+            10.0 * UNIT + 9.0 * GAP,
+            5.0 * KEY_H + 4.0 * GAP + 24.0 + 30.0,
+        )
+    }
+
     /// A pointer over the keyboard (a hand pointing in a headset): the key under it lights.
     pub fn hover(&mut self, x: f32, y: f32) {
         if let Some((row, col)) = self.key_at(x, y) {
@@ -314,8 +331,7 @@ impl Keyboard {
     }
 
     pub fn draw(&self, ui: &mut Ui, at_top: bool, glyphs: GlyphStyle) {
-        let width = 10.0 * UNIT + 9.0 * GAP;
-        let height = 5.0 * KEY_H + 4.0 * GAP + 24.0 + 30.0;
+        let (width, height) = Self::size();
         let x0 = ((ui.w - width) / 2.0).round();
         let y0 = if at_top { 16.0 } else { ui.h - height - 16.0 };
         self.drawn.set(Some((x0, y0)));
@@ -426,6 +442,19 @@ mod tests {
         let gap = 50.0 + KEY_H + GAP / 2.0;
         assert_eq!(k.click(101.0, gap), None, "between two rows");
         assert_eq!(Keyboard::default().click(101.0, 51.0), None, "never drawn");
+    }
+
+    #[test]
+    fn the_plate_covers_the_gaps_between_keys_too() {
+        let k = drawn();
+        let gap = 50.0 + KEY_H + GAP / 2.0;
+        assert!(
+            k.covers(101.0, gap),
+            "between two rows: still the keyboard's"
+        );
+        assert!(k.covers(95.0, 45.0), "its rim");
+        assert!(!k.covers(80.0, 45.0) && !k.covers(101.0, 20.0), "outside");
+        assert!(!Keyboard::default().covers(101.0, 51.0), "never drawn");
     }
 
     #[test]
