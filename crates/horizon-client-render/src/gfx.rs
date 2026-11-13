@@ -4009,6 +4009,9 @@ impl Renderer {
             let min_sections = if flat::is_broken_intel_vulkan(&info)
                 || flat::is_powervr_vulkan(&info)
                 || std::env::var("HORIZON_FLAT_DRAWS").as_deref() == Ok("1")
+                // Quest's Adreno 740 draws nothing from the per-section indirect draws (Starling
+                // VR: blocks missing without a shader pack, which draws flat): every frame flat.
+                || headset()
             {
                 0
             } else if flat::for_vanilla(&info) {
