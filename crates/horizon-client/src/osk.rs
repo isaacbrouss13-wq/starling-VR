@@ -157,7 +157,14 @@ pub struct Keyboard {
     /// The next letter is upper case (Shift), or every letter (double Shift).
     shift: bool,
     caps: bool,
+    /// Where the keys were last drawn (GUI pixels, top left), for a pointer's clicks.
+    drawn: std::cell::Cell<Option<(f32, f32)>>,
 }
+
+/// The keys' layout, GUI pixels: a key unit's width, the gap between keys, a key's height.
+const UNIT: f32 = 50.0;
+const GAP: f32 = 6.0;
+const KEY_H: f32 = 38.0;
 impl Default for Keyboard {
     fn default() -> Self {
         // Focus starts on `q`.
@@ -167,6 +174,7 @@ impl Default for Keyboard {
             symbols: false,
             shift: false,
             caps: false,
+            drawn: std::cell::Cell::new(None),
         }
     }
 }
@@ -273,14 +281,44 @@ impl Keyboard {
 
     /// Draw the keyboard across the bottom of the screen, or the top when
     /// the field it types into is in the lower half.
+    /// The key under a pointer at `(x, y)` (GUI pixels), on the keyboard as last drawn.
+    fn key_at(&self, x: f32, y: f32) -> Option<(usize, usize)> {
+        let (x0, y0) = self.drawn.get()?;
+        let row = ((y - y0) / (KEY_H + GAP)).floor();
+        if row < 0.0 || row >= self.rows().len() as f32 || y - y0 - row * (KEY_H + GAP) > KEY_H {
+            return None;
+        }
+        let keys = self.rows()[row as usize];
+        (0..keys.len())
+            .find(|&i| {
+                let (left, units) = Self::span(keys, i);
+                let kx = x0 + left * (UNIT + GAP);
+                x >= kx && x <= kx + units * UNIT + (units - 1.0) * GAP
+            })
+            .map(|col| (row as usize, col))
+    }
+
+    /// A pointer over the keyboard (a hand pointing in a headset): the key under it lights.
+    pub fn hover(&mut self, x: f32, y: f32) {
+        if let Some((row, col)) = self.key_at(x, y) {
+            (self.row, self.col) = (row, col);
+        }
+    }
+
+    /// A pointer's click at `(x, y)`: `None` when it misses the keyboard (the click is the
+    /// screen's), else the key's output, as `press` gives it.
+    pub fn click(&mut self, x: f32, y: f32) -> Option<Option<Output>> {
+        let (row, col) = self.key_at(x, y)?;
+        (self.row, self.col) = (row, col);
+        Some(self.press())
+    }
+
     pub fn draw(&self, ui: &mut Ui, at_top: bool, glyphs: GlyphStyle) {
-        const UNIT: f32 = 50.0;
-        const GAP: f32 = 6.0;
-        const KEY_H: f32 = 38.0;
         let width = 10.0 * UNIT + 9.0 * GAP;
         let height = 5.0 * KEY_H + 4.0 * GAP + 24.0 + 30.0;
         let x0 = ((ui.w - width) / 2.0).round();
         let y0 = if at_top { 16.0 } else { ui.h - height - 16.0 };
+        self.drawn.set(Some((x0, y0)));
         ui.rounded(
             x0 - 12.0,
             y0 - 12.0,
@@ -362,6 +400,49 @@ impl Keyboard {
 
 #[cfg(test)]
 mod tests {
+
+    /// A keyboard "drawn" with its keys' top left at (100, 50).
+    fn drawn() -> Keyboard {
+        let k = Keyboard::default();
+        k.drawn.set(Some((100.0, 50.0)));
+        k
+    }
+
+    #[test]
+    fn a_click_types_the_key_under_it() {
+        let mut k = drawn();
+        // The second row's third key: w is second, e third ("qwertyuiop").
+        let x = 100.0 + 2.0 * (UNIT + GAP) + UNIT / 2.0;
+        let y = 50.0 + (KEY_H + GAP) + KEY_H / 2.0;
+        assert_eq!(k.click(x, y), Some(Some(Output::Text("e".into()))));
+        // The top row's first key, a digit.
+        assert_eq!(k.click(101.0, 51.0), Some(Some(Output::Text("1".into()))));
+    }
+
+    #[test]
+    fn a_click_off_the_keys_is_the_screens() {
+        let mut k = drawn();
+        assert_eq!(k.click(10.0, 10.0), None, "beside the keyboard");
+        let gap = 50.0 + KEY_H + GAP / 2.0;
+        assert_eq!(k.click(101.0, gap), None, "between two rows");
+        assert_eq!(Keyboard::default().click(101.0, 51.0), None, "never drawn");
+    }
+
+    #[test]
+    fn the_bottom_row_shifts_and_hovering_moves_the_focus() {
+        let mut k = drawn();
+        let bottom = 50.0 + 4.0 * (KEY_H + GAP) + 1.0;
+        assert_eq!(
+            k.click(101.0, bottom),
+            Some(None),
+            "Shift changes only the keyboard"
+        );
+        let a = 50.0 + 2.0 * (KEY_H + GAP) + 1.0;
+        assert_eq!(k.click(101.0, a), Some(Some(Output::Text("A".into()))));
+        k.hover(101.0, 51.0);
+        assert_eq!(k.press(), Some(Output::Text("1".into())));
+    }
+
     use super::*;
 
     #[test]

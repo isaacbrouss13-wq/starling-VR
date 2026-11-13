@@ -84,6 +84,11 @@ impl Game<'_> {
                     continue;
                 }
             };
+            // A hand in a headset types on the on-screen keyboard.
+            #[cfg(feature = "xr")]
+            if self.xr_keyboard_event(&event) {
+                continue;
+            }
             self.handle_window_event(event_loop, id, event, InputOrigin::User);
         }
     }

@@ -15588,6 +15588,7 @@ impl Game<'_> {
     }
     fn render(&mut self) -> Result<bool> {
         self.xr_screen_mode();
+        self.xr_keyboard();
         // The window's GPU holds the atlas: its copy in memory is kept
         // compressed (a no-op once it is).
         if self.renderer.is_some() {
