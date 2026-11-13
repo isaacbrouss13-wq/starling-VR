@@ -994,7 +994,14 @@ impl Graphics {
         // laptop while a world loaded: a teleport there took ~15% longer.
         // A phone leaves two, as Starling was measured with: half its cores are small ones, and
         // a hot phone slows every core down.
-        let spare = if cfg!(target_os = "android") { 2 } else { 1 };
+        // Starling VR leaves one: Quest's own compositor and tracking run on cores the app isn't
+        // given, so every core it is given is a big one, and with two left a 3S had a single
+        // worker generating and meshing the world (about 20 s from a world's start to playing).
+        let spare = if cfg!(target_os = "android") && !cfg!(feature = "xr") {
+            2
+        } else {
+            1
+        };
         let auto = horizon_threads::worker_count().saturating_sub(spare).max(1);
         if self.battery { auto.div_ceil(2) } else { auto }
     }

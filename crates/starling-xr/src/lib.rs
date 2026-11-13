@@ -274,9 +274,10 @@ pub fn open(features: impl Fn(&wgpu::Adapter) -> wgpu::Features) -> Res<Opened> 
         .map_err(ctx("no headset"))?;
     if let Ok(p) = instance.system_properties(system) {
         log::info!(
-            "Starling VR: headset {} (vendor {})",
+            "Starling VR: headset {} (vendor {}), {} cores for the game",
             p.system_name,
-            p.vendor_id
+            p.vendor_id,
+            std::thread::available_parallelism().map_or(0, |n| n.get())
         );
     }
     // Asked before the instance by the spec, though only the device's version matters here.
