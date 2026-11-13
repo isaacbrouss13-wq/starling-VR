@@ -7984,6 +7984,31 @@ impl Renderer {
                 bytemuck::cast_slice(&self.draws),
             );
         }
+        #[cfg(feature = "xr")]
+        if xr::active() {
+            xr::note_terrain(|| {
+                format!(
+                    "{} {}x{}: {} sections held, {} in view (occlusion culling {}, distance {}), {} drawn, \
+                     {} draws, flat {flat_frame}, multi-draw {}, {} draw calls, eye {:?}, camera {:?}, \
+                     lods {}, title {}",
+                    if xr::flat() { "screen" } else { "eyes" },
+                    self.config.width,
+                    self.config.height,
+                    self.sections.len(),
+                    visible.len(),
+                    culling,
+                    frame.detail_distance,
+                    self.drawn_sections,
+                    self.draws.len(),
+                    self.multi_draw,
+                    self.section_draw_calls,
+                    eye,
+                    frame.camera,
+                    visible_lods.len(),
+                    frame.title,
+                )
+            });
+        }
         let view_target = target_texture.create_view(&wgpu::TextureViewDescriptor {
             format: Some(self.config.format.remove_srgb_suffix()),
             ..Default::default()

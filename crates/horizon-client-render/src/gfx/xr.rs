@@ -49,6 +49,20 @@ pub(super) fn note_memory_now_and_then() {
     }
 }
 
+/// Logs what the terrain drew, now and then (`render`'s line): once a second for the first ten
+/// seconds of each of the screen and the eyes, then every ten seconds.
+pub(super) fn note_terrain(line: impl FnOnce() -> String) {
+    static LAST: Mutex<[(Option<std::time::Instant>, u32); 2]> = Mutex::new([(None, 0); 2]);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    let (at, count) = &mut last[usize::from(!flat())];
+    let every = if *count < 10 { 1 } else { 10 };
+    if at.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(every)) {
+        *at = Some(std::time::Instant::now());
+        *count += 1;
+        log::info!("Starling VR: terrain: {}", line());
+    }
+}
+
 /// Whether the next frames show on a flat screen floating in front of the player (the title,
 /// setup, loading and any menu: what isn't the world around them) or in the eyes. The game says
 /// each frame.
