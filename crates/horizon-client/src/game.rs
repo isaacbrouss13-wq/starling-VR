@@ -21447,6 +21447,21 @@ impl Loading {
             event_loop.exit();
             return;
         }
+        // A hand pointing at a headset's flat screen touches it (Starling VR): the setup and
+        // these menus take touches.
+        #[cfg(all(target_os = "android", feature = "xr"))]
+        if let Some(id) = self.window.as_ref().map(|w| w.id()) {
+            for (phase, x, y) in crate::android::vr_touches() {
+                let touch = winit::event::Touch {
+                    device_id: winit::event::DeviceId::dummy(),
+                    phase,
+                    location: winit::dpi::PhysicalPosition::new(x, y),
+                    force: None,
+                    id: 0,
+                };
+                self.window_event(event_loop, id, WindowEvent::Touch(touch));
+            }
+        }
         if horizon_threads::stop_requests() > 0 {
             // No world is open yet: nothing to save.
             event_loop.exit();

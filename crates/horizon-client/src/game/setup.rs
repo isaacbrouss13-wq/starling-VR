@@ -785,8 +785,15 @@ impl Loading {
     /// A finger lifted on a button acts.
     pub(super) fn setup_touch(&mut self, touch: &Touch) {
         let Some(window) = &self.window else { return };
-        let size = window.inner_size();
-        let (pw, ph) = (size.width as f32, size.height as f32);
+        // The size the setup is drawn at (`draw_setup`): the window's on a phone, a headset's
+        // flat screen in Starling VR.
+        let (pw, ph) = match &self.renderer {
+            Some(r) => (r.config.width as f32, r.config.height as f32),
+            None => {
+                let size = window.inner_size();
+                (size.width as f32, size.height as f32)
+            }
+        };
         let density = (pw / 1040.0).min(ph / 700.0).clamp(1.0, 4.0);
         let p = [
             touch.location.x as f32 / density,

@@ -879,6 +879,37 @@ mod vr_pointer {
         down: false,
     });
 
+    /// The same hand as one finger, for screens that take touches only (the loading phase's
+    /// setup): down while the trigger is held, where the hand points (renderer pixels).
+    pub fn touches(out: &mut Vec<(winit::event::TouchPhase, f64, f64)>) {
+        use winit::event::TouchPhase;
+        let mut s = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(pointer) = xr::pointer() else {
+            if let (true, Some([x, y])) = (s.down, s.at) {
+                out.push((TouchPhase::Ended, f64::from(x), f64::from(y)));
+            }
+            *s = State::default();
+            return;
+        };
+        let [w, h] = xr::SCREEN_PIXELS;
+        let at = [pointer.at[0] * w as f32, pointer.at[1] * h as f32];
+        let trigger = xr::controllers().map_or(0.0, |c| c.triggers[1 - pointer.hand.min(1)]);
+        let down = if s.down {
+            trigger > RELEASE
+        } else {
+            trigger > PRESS
+        };
+        let (x, y) = (f64::from(at[0]), f64::from(at[1]));
+        match (s.down, down) {
+            (false, true) => out.push((TouchPhase::Started, x, y)),
+            (true, true) if s.at != Some(at) => out.push((TouchPhase::Moved, x, y)),
+            (true, false) => out.push((TouchPhase::Ended, x, y)),
+            _ => {}
+        }
+        s.down = down;
+        s.at = Some(at);
+    }
+
     pub fn events(out: &mut Vec<MouseEvent>) {
         let mut s = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(pointer) = xr::pointer() else {
@@ -906,6 +937,14 @@ mod vr_pointer {
             s.down = down;
         }
     }
+}
+
+/// A hand pointing at the headset's flat screen as a finger (`vr_pointer::touches`).
+#[cfg(feature = "xr")]
+pub fn vr_touches() -> Vec<(winit::event::TouchPhase, f64, f64)> {
+    let mut out = Vec::new();
+    vr_pointer::touches(&mut out);
+    out
 }
 
 /// The device id the Quest's controllers play as (no Android device has a negative one).
