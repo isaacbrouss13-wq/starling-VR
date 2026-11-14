@@ -1502,6 +1502,18 @@ pub fn main(app: AndroidApp) {
                 std::env::set_var(name, value);
             }
         }
+        // Starling VR times its start and its worlds' opening beside its log (spans::startup),
+        // for a player to send with it.
+        #[cfg(feature = "xr")]
+        if let Some(folder) = app.external_data_path()
+            && std::env::var_os("HORIZON_STARTUP_TRACE").is_none()
+        {
+            let _ = std::fs::create_dir_all(&folder);
+            std::env::set_var(
+                "HORIZON_STARTUP_TRACE",
+                folder.join("starling-vr-timing.json"),
+            );
+        }
     }
     if let Err(e) = std::env::set_current_dir(&home) {
         logcat(

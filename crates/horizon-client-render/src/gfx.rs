@@ -1775,6 +1775,8 @@ fn open_headset() -> std::result::Result<Opened, String> {
         size,
     } = xr::open(device_features)?;
     describe_adapter(&adapter);
+    // The menu atlas waits for this (up to 20 s on Android) before it packs.
+    crate::hud::set_gpu_texture_side(adapter.limits().max_texture_dimension_2d);
     *HEADSET_SIZE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(size);
